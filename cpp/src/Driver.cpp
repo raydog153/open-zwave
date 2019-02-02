@@ -37,10 +37,12 @@
 #include "platform/Event.h"
 #include "platform/Mutex.h"
 #include "platform/SerialController.h"
+#ifdef USE_HID
 #ifdef WINRT
 #include "platform/winRT/HidControllerWinRT.h"
 #else
 #include "platform/HidController.h"
+#endif
 #endif
 #include "platform/Thread.h"
 #include "platform/Log.h"
@@ -201,6 +203,8 @@ m_nondelivery( 0 ),
 m_routedbusy( 0 ),
 m_broadcastReadCnt( 0 ),
 m_broadcastWriteCnt( 0 ),
+AuthKey( 0 ),
+EncryptKey( 0 ),
 m_nonceReportSent( 0 ),
 m_nonceReportSentAttempt( 0 )
 {
@@ -223,11 +227,13 @@ m_nonceReportSentAttempt( 0 )
 
 	initNetworkKeys(false);
 
+#ifdef USE_HID
 	if( ControllerInterface_Hid == _interface )
 	{
 		m_controller = new HidController();
 	}
 	else
+#endif
 	{
 		m_controller = new SerialController();
 	}
@@ -352,7 +358,8 @@ Driver::~Driver
 
 	m_notificationsEvent->Release();
 	m_nodeMutex->Release();
-
+	delete AuthKey;
+	delete EncryptKey;
 }
 
 //-----------------------------------------------------------------------------
@@ -1046,6 +1053,15 @@ bool Driver::WriteNextMsg
 		{
 			m_queueEvent[_queue]->Reset();
 		}
+		if (m_nonceReportSent > 0) {
+			MsgQueueItem item_new;
+			item_new.m_command = MsgQueueCmd_SendMsg;
+			item_new.m_nodeId = item.m_msg->GetTargetNodeId();
+			item_new.m_retry = item.m_retry;
+			item_new.m_msg = new Msg(*item.m_msg);
+			m_msgQueue[_queue].push_front(item_new);
+			m_queueEvent[_queue]->Set();
+		}
 		m_sendMutex->Unlock();
 		return WriteMsg( "WriteNextMsg" );
 	}
@@ -1108,8 +1124,8 @@ bool Driver::WriteNextMsg
 			if( m_currentControllerCommand->m_controllerCallback )
 			{
 				m_currentControllerCommand->m_controllerCallback( m_currentControllerCommand->m_controllerState, m_currentControllerCommand->m_controllerReturnError, m_currentControllerCommand->m_controllerCallbackContext );
-				m_currentControllerCommand->m_controllerStateChanged = false;
 			}
+			m_currentControllerCommand->m_controllerStateChanged = false;
 		}
 		else
 		{
@@ -1635,7 +1651,9 @@ bool Driver::ReadMsg
 (
 )
 {
-	uint8 buffer[1024] = {0};
+	uint8 buffer[1024];
+
+	memset(buffer, 0, sizeof(uint8)* 1024);
 
 	if( !m_controller->Read( buffer, 1 ) )
 	{
@@ -3909,6 +3927,11 @@ void Driver::CommonAddNodeStatusRequestHandler
 			{
 				m_currentControllerCommand->m_controllerAdded = true;
 				m_currentControllerCommand->m_controllerCommandNode = _data[4];
+				/* make sure we dont overrun our buffer. Its ok to truncate */
+				uint8 length = _data[5];
+				if (length > 254) length = 254;
+				memcpy(&m_currentControllerCommand->m_controllerDeviceProtocolInfo, &_data[6], length);
+				m_currentControllerCommand->m_controllerDeviceProtocolInfoLength = length;
 			}
 //			AddNodeStop( _funcId );
 			break;
